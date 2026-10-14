@@ -7,18 +7,21 @@ import {
   agentCode,
   patchCode,
   mainCode,
+  configCode,
   requirementsTxt,
 } from './data/codeFiles';
 
-type Section = 'overview' | 'architecture' | 'install' | 'usage' | 'ingest' | 'context' | 'agent' | 'patch' | 'main' | 'requirements';
+type Section = 'overview' | 'architecture' | 'install' | 'usage' | 'env' | 'ingest' | 'context' | 'config' | 'agent' | 'patch' | 'main' | 'requirements';
 
 const sections: { id: Section; label: string; icon: React.ReactNode }[] = [
   { id: 'overview', label: 'Overview', icon: <Shield size={16} /> },
   { id: 'architecture', label: 'Architecture', icon: <Zap size={16} /> },
   { id: 'install', label: 'Installation', icon: <Terminal size={16} /> },
   { id: 'usage', label: 'Usage', icon: <FileText size={16} /> },
+  { id: 'env', label: 'Env & Secrets', icon: <GitBranch size={16} /> },
   { id: 'ingest', label: 'ingest.py', icon: <Code size={16} /> },
   { id: 'context', label: 'context.py', icon: <Code size={16} /> },
+  { id: 'config', label: 'config.py', icon: <Code size={16} /> },
   { id: 'agent', label: 'agent.py', icon: <Code size={16} /> },
   { id: 'patch', label: 'patch.py', icon: <Code size={16} /> },
   { id: 'main', label: 'main.py', icon: <Code size={16} /> },
@@ -94,8 +97,10 @@ export default function App() {
           {activeSection === 'architecture' && <ArchitectureSection />}
           {activeSection === 'install' && <InstallSection />}
           {activeSection === 'usage' && <UsageSection />}
+          {activeSection === 'env' && <EnvSection />}
           {activeSection === 'ingest' && <CodeSection title="ingest.py" subtitle="Vulnerability Report Parser Module" code={ingestCode} language="python" />}
           {activeSection === 'context' && <CodeSection title="context.py" subtitle="Code Context Extraction Module" code={contextCode} language="python" />}
+          {activeSection === 'config' && <CodeSection title="config.py" subtitle="Centralized Configuration & Environment Loading" code={configCode} language="python" />}
           {activeSection === 'agent' && <CodeSection title="agent.py" subtitle="LLM Orchestration Agent Module" code={agentCode} language="python" />}
           {activeSection === 'patch' && <CodeSection title="patch.py" subtitle="Patch Application & Diff Generation" code={patchCode} language="python" />}
           {activeSection === 'main' && <CodeSection title="main.py" subtitle="CLI Entry Point & Pipeline Orchestrator" code={mainCode} language="python" />}
@@ -359,19 +364,32 @@ python -m venv .venv
 source .venv/bin/activate  # Linux/macOS
 # .venv\\Scripts\\activate   # Windows
 
-# Install dependencies
-pip install -r requirements.txt`}
+# Install dependencies (includes python-dotenv)
+pip install -r requirements.txt
+
+# Set up environment variables
+cp .env.example .env
+# Edit .env with your real API keys (DASHSCOPE_API_KEY, etc.)`}
         />
 
-        <CodeBlock
-          language="bash"
-          filename="Set API Key"
-          code={`# For OpenAI
-export OPENAI_API_KEY="sk-..."
+        <div className="bg-gray-800/30 rounded-xl border border-gray-700/50 p-5 mt-4">
+          <h4 className="font-semibold text-white mb-3">Configure API Keys (choose your provider)</h4>
+          <CodeBlock
+            language="bash"
+            filename=".env"
+            code={`# Option A: Qwen via DashScope (recommended)
+DASHSCOPE_API_KEY=sk-your-dashscope-key
+AUTOFIX_DEFAULT_PROVIDER=qwen
 
-# For Anthropic
-export ANTHROPIC_API_KEY="sk-ant-..."`}
-        />
+# Option B: OpenAI
+OPENAI_API_KEY=sk-your-openai-key
+AUTOFIX_DEFAULT_PROVIDER=openai
+
+# Option C: Anthropic
+ANTHROPIC_API_KEY=sk-ant-your-key
+AUTOFIX_DEFAULT_PROVIDER=anthropic`}
+          />
+        </div>
       </div>
 
       <div className="bg-gray-800/30 rounded-xl border border-gray-700/50 p-6">
@@ -380,11 +398,15 @@ export ANTHROPIC_API_KEY="sk-ant-..."`}
           language="bash"
           code={`autosec-fixer/
 ├── main.py              # CLI entry point & pipeline orchestration
+├── config.py            # Environment loading & configuration (python-dotenv)
 ├── ingest.py            # Vulnerability report parser (SARIF/JSON)
 ├── context.py           # Code context extraction & AST analysis
 ├── agent.py             # LLM orchestration & prompt engineering
 ├── patch.py             # Patch application & diff generation
 ├── requirements.txt     # Python dependencies
+├── .env                 # Your local API keys (NOT committed to Git)
+├── .env.example         # Template for GitHub (committed, fake values)
+├── .gitignore           # Excludes .env, venv, __pycache__, etc.
 ├── README.md            # Documentation
 ├── tests/
 │   ├── test_ingest.py   # Ingestion unit tests
@@ -534,6 +556,228 @@ function CodeSection({ title, subtitle, code, language }: { title: string; subti
         <p className="text-gray-400">{subtitle}</p>
       </div>
       <CodeBlock code={code} language={language} filename={title} maxHeight="700px" />
+    </div>
+  );
+}
+
+function EnvSection() {
+  return (
+    <div className="space-y-8">
+      <div>
+        <h2 className="text-3xl font-bold text-white mb-2">Environment & Secrets</h2>
+        <p className="text-gray-400">
+          How API keys and configuration are managed securely using <code className="text-emerald-400">python-dotenv</code>.
+        </p>
+      </div>
+
+      <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-5">
+        <div className="flex items-start gap-3">
+          <span className="text-emerald-400 text-xl">🔐</span>
+          <div>
+            <h4 className="font-semibold text-emerald-300 mb-1">Security First</h4>
+            <p className="text-sm text-gray-400">
+              API keys are <strong>never</strong> hardcoded in source code. They are loaded from environment
+              variables at runtime using <code className="text-emerald-400">python-dotenv</code>. The <code className="text-emerald-400">.env</code> file
+              is listed in <code className="text-emerald-400">.gitignore</code> and will never be committed to Git.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        <h3 className="text-lg font-semibold text-white">1. The <code className="text-cyan-400">.env</code> File (Local, Never Committed)</h3>
+        <p className="text-sm text-gray-400">
+          This file lives on your machine only. It contains your real API keys and is excluded from Git
+          via <code className="text-gray-300">.gitignore</code>.
+        </p>
+        <CodeBlock
+          language="bash"
+          filename=".env"
+          code={`# ============================================
+# AutoSec-Fixer - Local Environment Variables
+# ============================================
+# ⚠️  NEVER commit this file to version control.
+#     This file is listed in .gitignore.
+# ============================================
+
+# --- Qwen (Alibaba Cloud / DashScope) ---
+DASHSCOPE_API_KEY=sk-your-dashscope-api-key-here
+
+# Optional: OpenAI-compatible endpoint for Qwen
+QWEN_API_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+QWEN_MODEL_NAME=qwen-plus
+
+# --- OpenAI ---
+OPENAI_API_KEY=sk-your-openai-api-key-here
+
+# --- Anthropic ---
+ANTHROPIC_API_KEY=sk-ant-your-anthropic-api-key-here
+
+# --- AutoSec-Fixer Configuration ---
+AUTOFIX_DEFAULT_PROVIDER=qwen
+AUTOFIX_DEFAULT_MODEL=qwen-plus
+AUTOFIX_LOG_LEVEL=INFO
+AUTOFIX_CONTEXT_LINES=20
+AUTOFIX_MAX_RETRIES=3
+AUTOFIX_TEMPERATURE=0.1`}
+        />
+      </div>
+
+      <div className="space-y-4">
+        <h3 className="text-lg font-semibold text-white">2. The <code className="text-cyan-400">.env.example</code> File (Committed to GitHub)</h3>
+        <p className="text-sm text-gray-400">
+          This file is committed to Git and serves as a template. It contains fake placeholder values
+          so contributors know which variables to set.
+        </p>
+        <CodeBlock
+          language="bash"
+          filename=".env.example"
+          code={`# Copy this file to .env and fill in your keys:
+#   cp .env.example .env
+
+DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+QWEN_API_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+QWEN_MODEL_NAME=qwen-plus
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+AUTOFIX_DEFAULT_PROVIDER=qwen
+AUTOFIX_DEFAULT_MODEL=qwen-plus
+AUTOFIX_LOG_LEVEL=INFO
+AUTOFIX_CONTEXT_LINES=20
+AUTOFIX_MAX_RETRIES=3
+AUTOFIX_TEMPERATURE=0.1`}
+        />
+      </div>
+
+      <div className="space-y-4">
+        <h3 className="text-lg font-semibold text-white">3. Loading Environment Variables with <code className="text-cyan-400">python-dotenv</code></h3>
+        <p className="text-sm text-gray-400 mb-3">
+          The <code className="text-emerald-400">config.py</code> module automatically loads <code className="text-gray-300">.env</code> at import time.
+          Here's the pattern used throughout the codebase:
+        </p>
+        <CodeBlock
+          language="python"
+          filename="config.py (excerpt)"
+          code={`from dotenv import load_dotenv
+import os
+from pathlib import Path
+
+# Load .env file at import time (runs once when module is imported)
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    load_dotenv(dotenv_path=_env_file, override=False)
+else:
+    load_dotenv(override=False)  # Try current working directory
+
+# Now os.getenv() returns values from .env
+api_key = os.getenv("DASHSCOPE_API_KEY")
+provider = os.getenv("AUTOFIX_DEFAULT_PROVIDER", "qwen")`}
+        />
+      </div>
+
+      <div className="space-y-4">
+        <h3 className="text-lg font-semibold text-white">4. Usage in Other Modules</h3>
+        <CodeBlock
+          language="python"
+          filename="main.py (excerpt)"
+          code={`# config.py loads .env at import time, so just import it:
+from config import settings, create_provider, validate_env
+
+# 'settings' is a typed dataclass with all config values
+print(settings.default_provider)   # "qwen" (from .env)
+print(settings.temperature)        # 0.1 (from .env)
+
+# create_provider() reads API keys from environment automatically
+provider = create_provider("qwen")  # Uses DASHSCOPE_API_KEY from .env
+
+# validate_env() checks that at least one API key is set
+if not validate_env():
+    sys.exit(1)`}
+        />
+      </div>
+
+      <div className="space-y-4">
+        <h3 className="text-lg font-semibold text-white">5. The <code className="text-cyan-400">.gitignore</code> File</h3>
+        <p className="text-sm text-gray-400 mb-3">
+          Ensures secrets and environment files are never tracked by Git:
+        </p>
+        <CodeBlock
+          language="bash"
+          filename=".gitignore"
+          code={`# Environment & Secrets
+.env
+.env.local
+.env.*.local
+*.env
+!*.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node / Frontend
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AutoSec-Fixer Runtime
+autosecfix_output/
+*.autosecfix.bak
+*.patch`}
+        />
+      </div>
+
+      <div className="bg-gray-800/30 rounded-xl border border-gray-700/50 p-6">
+        <h3 className="text-lg font-semibold text-white mb-4">Quick Setup Checklist</h3>
+        <div className="space-y-3">
+          {[
+            { step: '1', text: 'Install python-dotenv: pip install python-dotenv', done: true },
+            { step: '2', text: 'Copy template: cp .env.example .env', done: true },
+            { step: '3', text: 'Edit .env with your real API keys', done: false },
+            { step: '4', text: 'Verify .gitignore excludes .env', done: true },
+            { step: '5', text: 'Commit .env.example (NOT .env) to GitHub', done: true },
+            { step: '6', text: 'Run: python main.py --report scan.json --repo ./code', done: false },
+          ].map((item) => (
+            <div key={item.step} className="flex items-center gap-3">
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
+                item.done ? 'bg-emerald-500/20 text-emerald-400' : 'bg-gray-700 text-gray-400'
+              }`}>
+                {item.done ? '✓' : item.step}
+              </div>
+              <span className={`text-sm ${item.done ? 'text-gray-300' : 'text-gray-500'}`}>
+                {item.text}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-5">
+        <div className="flex items-start gap-3">
+          <span className="text-amber-400 text-xl">⚠️</span>
+          <div>
+            <h4 className="font-semibold text-amber-300 mb-1">Common Mistakes to Avoid</h4>
+            <ul className="text-sm text-gray-400 space-y-1">
+              <li>• <strong>Never</strong> commit <code className="text-gray-300">.env</code> to Git — only <code className="text-gray-300">.env.example</code></li>
+              <li>• <strong>Never</strong> hardcode API keys in source files</li>
+              <li>• <strong>Don't</strong> log full API keys (the config module masks them automatically)</li>
+              <li>• <strong>Don't</strong> use <code className="text-gray-300">override=True</code> in <code className="text-gray-300">load_dotenv()</code> unless you need shell vars to take precedence</li>
+              <li>• <strong>Do</strong> rotate keys if <code className="text-gray-300">.env</code> is accidentally committed</li>
+            </ul>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

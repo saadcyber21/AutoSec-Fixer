@@ -644,6 +644,115 @@ class AnthropicProvider:
         raise RuntimeError(f"LLM failed after {max_retries} attempts: {last_error}")
 
 
+class QwenProvider:
+    """Qwen (Tongyi Qianwen) provider via DashScope OpenAI-compatible API.
+
+    Uses the OpenAI SDK pointed at DashScope's compatible endpoint,
+    so all Qwen models (qwen-plus, qwen-turbo, qwen-max, etc.) work
+    through a unified OpenAI-compatible interface.
+
+    Environment Variables:
+        DASHSCOPE_API_KEY: Your DashScope API key.
+        QWEN_API_BASE_URL: Base URL (default: DashScope compatible endpoint).
+        QWEN_MODEL_NAME: Model name (default: qwen-plus).
+
+    Example:
+        >>> provider = QwenProvider(
+        ...     api_key=os.environ["DASHSCOPE_API_KEY"],
+        ...     model="qwen-plus",
+        ...     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+        ... )
+        >>> response = provider.generate(prompt, system_prompt)
+    """
+
+    DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "qwen-plus",
+        base_url: Optional[str] = None,
+    ) -> None:
+        """Initialize Qwen provider via OpenAI-compatible DashScope API.
+
+        Args:
+            api_key: DashScope API key (from DASHSCOPE_API_KEY env var).
+            model: Qwen model name (qwen-plus, qwen-turbo, qwen-max, etc.).
+            base_url: DashScope OpenAI-compatible endpoint URL.
+        """
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise ImportError(
+                "openai package required for Qwen provider: pip install openai"
+            )
+
+        self.model = model
+        self.base_url = base_url or self.DEFAULT_BASE_URL
+
+        # Qwen uses OpenAI-compatible API via DashScope
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=self.base_url,
+        )
+        logger.info(f"QwenProvider initialized: model={model}, base_url={self.base_url}")
+
+    def generate(self, prompt: str, system: str, **kwargs: Any) -> str:
+        """Generate a completion from Qwen via DashScope.
+
+        Args:
+            prompt: User prompt string.
+            system: System prompt string.
+            **kwargs: Additional parameters (temperature, max_tokens).
+
+        Returns:
+            Generated text response.
+        """
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=kwargs.get("temperature", 0.1),
+            max_tokens=kwargs.get("max_tokens", 4096),
+        )
+        return response.choices[0].message.content or ""
+
+    def generate_with_retries(
+        self, prompt: str, system: str, max_retries: int = 3, **kwargs: Any
+    ) -> str:
+        """Generate with exponential backoff retries.
+
+        Args:
+            prompt: User prompt string.
+            system: System prompt string.
+            max_retries: Maximum number of retry attempts.
+            **kwargs: Additional parameters passed to generate().
+
+        Returns:
+            Generated text response.
+
+        Raises:
+            RuntimeError: If all retry attempts fail.
+        """
+        last_error: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                return self.generate(prompt, system, **kwargs)
+            except Exception as e:
+                last_error = e
+                wait_time = 2 ** attempt
+                logger.warning(
+                    f"Qwen API call failed (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {wait_time}s..."
+                )
+                time.sleep(wait_time)
+        raise RuntimeError(
+            f"Qwen generation failed after {max_retries} attempts: {last_error}"
+        )
+
+
 @dataclass
 class PatchProposal:
     """A proposed code patch from the LLM agent."""
@@ -1075,10 +1184,18 @@ main.py - AutoSec-Fixer CLI Entry Point
 
 Autonomous AI Security Remediation Agent - End-to-end pipeline.
 
+Environment variables are loaded automatically from .env via python-dotenv.
+See .env.example for all supported variables.
+
 Usage:
+    # First, set up your environment:
+    cp .env.example .env
+    # Edit .env with your API keys (DASHSCOPE_API_KEY, OPENAI_API_KEY, etc.)
+
+    # Then run:
     python main.py --report semgrep_results.json --repo /path/to/codebase
     python main.py --report bandit_output.json --repo ./myproject --dry-run
-    python main.py --report findings.sarif --repo /code --provider anthropic
+    python main.py --report findings.sarif --repo /code --provider qwen
 
 Author: AutoSec-Fixer Team
 License: MIT
@@ -1095,14 +1212,16 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+# IMPORTANT: config module loads .env via python-dotenv at import time.
+# All subsequent modules can access os.environ with the loaded values.
+from config import settings, create_provider, validate_env, get_api_key
 from ingest import VulnerabilityIngestor, VulnerabilityReport, IngestionError
 from context import ContextExtractor, CodeContext, ContextExtractionError
-from agent import (SecurityRemediationAgent, OpenAIProvider, AnthropicProvider,
-                   AgentResult, AgentState)
+from agent import SecurityRemediationAgent, AgentResult, AgentState
 from patch import PatchApplier, PatchResult, PatchSet
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, settings.log_level, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -1110,24 +1229,45 @@ logger = logging.getLogger("autosec-fixer")
 
 
 def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Parse command-line arguments.
+
+    CLI arguments override environment variables from .env.
+    """
     parser = argparse.ArgumentParser(
         prog="autosec-fixer",
-        description="AutoSec-Fixer: Autonomous AI Security Remediation Agent.",
+        description=(
+            "AutoSec-Fixer: Autonomous AI Security Remediation Agent.\\n\\n"
+            "API keys are loaded from .env (via python-dotenv) or environment "
+            "variables. See .env.example for configuration."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=("Examples:\\n"
-                "  %(prog)s --report semgrep.json --repo ./myproject\\n"
-                "  %(prog)s --report bandit.json --repo /code --dry-run\\n"
-                "  %(prog)s --report findings.sarif --repo ./app --severity HIGH"))
+        epilog=(
+            "Environment Variables (loaded from .env automatically):\\n"
+            "  DASHSCOPE_API_KEY    Qwen/DashScope API key\\n"
+            "  OPENAI_API_KEY       OpenAI API key\\n"
+            "  ANTHROPIC_API_KEY    Anthropic API key\\n"
+            "  AUTOFIX_DEFAULT_PROVIDER  Default provider (qwen/openai/anthropic)\\n\\n"
+            "Examples:\\n"
+            "  %(prog)s --report semgrep.json --repo ./myproject\\n"
+            "  %(prog)s --report bandit.json --repo /code --dry-run\\n"
+            "  %(prog)s --report findings.sarif --repo ./app --provider qwen\\n"
+            "  %(prog)s --report results.json --repo ./code --severity HIGH"
+        ),
+    )
     parser.add_argument("--report", "-r", required=True,
                         help="Path to vulnerability report (SARIF or JSON)")
     parser.add_argument("--repo", "-p", required=True,
                         help="Path to source code repository")
-    parser.add_argument("--provider", choices=["openai", "anthropic"], default="openai",
-                        help="LLM provider (default: openai)")
-    parser.add_argument("--model", default=None, help="Specific model to use")
-    parser.add_argument("--api-key", default=None, help="API key (or use env var)")
-    parser.add_argument("--severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"],
+    parser.add_argument("--provider",
+                        choices=["openai", "anthropic", "qwen"],
+                        default=None,
+                        help=f"LLM provider (default: {settings.default_provider} from env)")
+    parser.add_argument("--model", default=None,
+                        help=f"Model name (default: from env/provider config)")
+    parser.add_argument("--api-key", default=None,
+                        help="API key override (prefer .env or env vars)")
+    parser.add_argument("--severity",
+                        choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"],
                         default=None, help="Minimum severity threshold")
     parser.add_argument("--max-vulns", type=int, default=None,
                         help="Maximum vulnerabilities to process")
@@ -1135,51 +1275,36 @@ def parse_arguments() -> argparse.Namespace:
                         help="Only process files matching this pattern")
     parser.add_argument("--dry-run", action="store_true",
                         help="Generate patches without modifying files")
-    parser.add_argument("--output-dir", default="./autosecfix_output",
-                        help="Output directory for diffs and patches")
+    parser.add_argument("--output-dir", default=None,
+                        help=f"Output directory (default: {settings.output_dir})")
     parser.add_argument("--no-backup", action="store_true",
                         help="Skip creating backup files")
     parser.add_argument("--git-commit", action="store_true",
                         help="Create Git commit after patching")
-    parser.add_argument("--context-lines", type=int, default=20,
-                        help="Context lines above/below (default: 20)")
+    parser.add_argument("--context-lines", type=int, default=None,
+                        help=f"Context lines +/-N (default: {settings.context_lines})")
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress output")
     return parser.parse_args()
 
 
 def setup_logging(verbose: bool = False, quiet: bool = False) -> None:
+    """Configure logging based on verbosity settings.
+
+    Priority: CLI flags > .env AUTOFIX_LOG_LEVEL > default INFO.
+    """
     if quiet:
         level = logging.ERROR
     elif verbose:
         level = logging.DEBUG
     else:
-        level = logging.INFO
+        level = getattr(logging, settings.log_level, logging.INFO)
     logging.getLogger().setLevel(level)
 
 
-def get_api_key(provider: str, explicit_key: Optional[str] = None) -> str:
-    if explicit_key:
-        return explicit_key
-    env_var = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(provider, "")
-    key = os.environ.get(env_var)
-    if not key:
-        logger.error(f"No API key. Set {env_var} or use --api-key")
-        sys.exit(1)
-    return key
-
-
-def create_provider(args: argparse.Namespace):
-    api_key = get_api_key(args.provider, args.api_key)
-    if args.provider == "openai":
-        return OpenAIProvider(api_key=api_key, model=args.model or "gpt-4-turbo-preview")
-    elif args.provider == "anthropic":
-        return AnthropicProvider(api_key=api_key, model=args.model or "claude-3-opus-20240229")
-    else:
-        sys.exit(1)
-
-
-def filter_vulnerabilities(report: VulnerabilityReport, args: argparse.Namespace) -> List:
+def filter_vulnerabilities(report: VulnerabilityReport,
+                           args: argparse.Namespace) -> List:
+    """Apply filters to the vulnerability report."""
     vulns = report.vulnerabilities
     if args.severity:
         vulns = report.filter_by_severity(args.severity)
@@ -1192,15 +1317,31 @@ def filter_vulnerabilities(report: VulnerabilityReport, args: argparse.Namespace
 
 
 def run_pipeline(args: argparse.Namespace) -> int:
-    """Execute the end-to-end remediation pipeline."""
+    """Execute the end-to-end remediation pipeline.
+
+    Uses settings from .env (loaded via python-dotenv at import time).
+    CLI arguments override environment variable defaults.
+    """
     start_time = time.time()
+
+    # Validate that at least one API key is available
+    if not validate_env():
+        return 1
+
+    # Resolve provider: CLI arg > env var > default
+    provider_name = args.provider or settings.default_provider
+    output_dir_path = args.output_dir or settings.output_dir
+    context_lines = args.context_lines or settings.context_lines
+
     logger.info("=" * 60)
     logger.info("AutoSec-Fixer - Autonomous Security Remediation")
     logger.info("=" * 60)
     logger.info(f"Report: {args.report}")
     logger.info(f"Repository: {args.repo}")
-    logger.info(f"Provider: {args.provider}")
+    logger.info(f"Provider: {provider_name}")
+    logger.info(f"Model: {args.model or 'auto'}")
     logger.info(f"Mode: {'DRY RUN' if args.dry_run else 'LIVE'}")
+    logger.info(f"Config loaded from: .env (python-dotenv)")
 
     # Phase 1: Ingest
     logger.info("\\n[Phase 1] Parsing vulnerability report...")
@@ -1222,16 +1363,31 @@ def run_pipeline(args: argparse.Namespace) -> int:
         return 0
     logger.info(f"\\n  Processing {len(vulnerabilities)} vulnerabilities...")
 
-    # Phase 3: LLM Setup
+    # Phase 3: LLM Setup (uses config module with env vars)
     logger.info("\\n[Phase 2] Initializing LLM provider...")
-    provider = create_provider(args)
-    agent = SecurityRemediationAgent(provider=provider)
+    try:
+        provider = create_provider(
+            provider=provider_name,
+            api_key=args.api_key,  # CLI override if provided
+        )
+    except Exception as e:
+        logger.error(f"Failed to initialize LLM provider: {e}")
+        return 1
+
+    agent = SecurityRemediationAgent(
+        provider=provider,
+        max_retries=settings.max_retries,
+        temperature=settings.temperature,
+    )
 
     # Phase 4: Extract context & generate patches
     logger.info("\\n[Phase 3] Analyzing code and generating patches...")
-    extractor = ContextExtractor(context_lines=args.context_lines)
-    applier = PatchApplier(repo_root=args.repo, create_backups=not args.no_backup)
-    output_dir = Path(args.output_dir)
+    extractor = ContextExtractor(context_lines=context_lines)
+    applier = PatchApplier(
+        repo_root=args.repo,
+        create_backups=not args.no_backup and settings.create_backups,
+    )
+    output_dir = Path(output_dir_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     results: List[AgentResult] = []
@@ -1275,6 +1431,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         "total_vulnerabilities": len(vulnerabilities),
         "patches_generated": len(patches_to_apply),
         "elapsed_seconds": round(elapsed, 2),
+        "provider": provider_name,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     logger.info(f"\\nCompleted in {elapsed:.2f}s")
@@ -1282,11 +1439,20 @@ def run_pipeline(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
+    """Main entry point. Loads .env via config module, then runs pipeline."""
+    # NOTE: .env is already loaded at import time by config.py
+    # (config.py calls load_dotenv() when imported)
     args = parse_arguments()
     setup_logging(verbose=args.verbose, quiet=args.quiet)
+
+    logger.debug(f"Settings loaded: provider={settings.default_provider}, "
+                 f"model={settings.default_model}, "
+                 f"temperature={settings.temperature}")
+
     try:
         sys.exit(run_pipeline(args))
     except KeyboardInterrupt:
+        logger.info("\\nInterrupted by user.")
         sys.exit(130)
     except Exception as e:
         logger.error(f"Unexpected error: {e}", exc_info=args.verbose)
@@ -1297,8 +1463,294 @@ if __name__ == "__main__":
     main()
 `;
 
+export const configCode = `"""
+config.py - Centralized Configuration & Environment Loading
+============================================================
+
+Loads environment variables from .env files using python-dotenv,
+provides typed configuration access, and handles API key resolution
+for all supported LLM providers (OpenAI, Anthropic, Qwen/DashScope).
+
+Usage:
+    from config import settings, get_api_key, create_provider
+
+    # Access typed settings
+    print(settings.default_provider)
+    print(settings.temperature)
+
+    # Get API key for a provider
+    key = get_api_key("qwen")
+
+    # Create a configured LLM provider
+    provider = create_provider("qwen")
+
+Author: AutoSec-Fixer Team
+License: MIT
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
+# Load .env file from project root (if it exists)
+# This runs at import time so all modules get the env vars
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    load_dotenv(dotenv_path=_env_file, override=False)
+else:
+    # Try loading from current working directory
+    load_dotenv(override=False)
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Immutable application settings loaded from environment variables.
+
+    All settings have sensible defaults and can be overridden via
+    environment variables (see .env.example for full list).
+
+    Attributes:
+        default_provider: Default LLM provider (openai, anthropic, qwen).
+        default_model: Default model identifier per provider.
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR).
+        context_lines: Number of context lines above/below vulnerability.
+        max_retries: Maximum LLM generation retry attempts.
+        temperature: LLM sampling temperature (0.0 = deterministic).
+        qwen_api_base: Base URL for Qwen OpenAI-compatible endpoint.
+        qwen_model_name: Model name for Qwen API calls.
+        output_dir: Default output directory for patches and diffs.
+        create_backups: Whether to create backup files before patching.
+    """
+
+    default_provider: str = "qwen"
+    default_model: str = "qwen-plus"
+    log_level: str = "INFO"
+    context_lines: int = 20
+    max_retries: int = 3
+    temperature: float = 0.1
+    qwen_api_base: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    qwen_model_name: str = "qwen-plus"
+    output_dir: str = "./autosecfix_output"
+    create_backups: bool = True
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        """Create Settings instance from environment variables.
+
+        Returns:
+            Settings populated from environment, with defaults for
+            any variables not set.
+        """
+        return cls(
+            default_provider=os.getenv("AUTOFIX_DEFAULT_PROVIDER", "qwen").lower(),
+            default_model=os.getenv("AUTOFIX_DEFAULT_MODEL", "qwen-plus"),
+            log_level=os.getenv("AUTOFIX_LOG_LEVEL", "INFO").upper(),
+            context_lines=int(os.getenv("AUTOFIX_CONTEXT_LINES", "20")),
+            max_retries=int(os.getenv("AUTOFIX_MAX_RETRIES", "3")),
+            temperature=float(os.getenv("AUTOFIX_TEMPERATURE", "0.1")),
+            qwen_api_base=os.getenv(
+                "QWEN_API_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            qwen_model_name=os.getenv("QWEN_MODEL_NAME", "qwen-plus"),
+            output_dir=os.getenv("AUTOFIX_OUTPUT_DIR", "./autosecfix_output"),
+            create_backups=os.getenv("AUTOFIX_CREATE_BACKUPS", "true").lower()
+            in ("true", "1", "yes"),
+        )
+
+
+# Global settings singleton - loaded once at import time
+settings = Settings.from_env()
+
+
+# --- API Key Management ---
+
+# Map of provider names to their environment variable names
+_PROVIDER_ENV_VARS: dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "qwen": "DASHSCOPE_API_KEY",
+    "dashscope": "DASHSCOPE_API_KEY",
+}
+
+
+def get_api_key(provider: str, explicit_key: Optional[str] = None) -> str:
+    """Resolve the API key for a given LLM provider.
+
+    Resolution order:
+        1. Explicitly provided key (CLI argument)
+        2. Environment variable (from .env or shell)
+        3. Raises SystemExit if not found
+
+    Args:
+        provider: Provider name (openai, anthropic, qwen, dashscope).
+        explicit_key: Optional explicitly provided API key.
+
+    Returns:
+        The resolved API key string.
+
+    Raises:
+        SystemExit: If no API key can be found for the provider.
+    """
+    if explicit_key:
+        logger.debug(f"Using explicitly provided API key for {provider}")
+        return explicit_key
+
+    provider_lower = provider.lower()
+    env_var = _PROVIDER_ENV_VARS.get(provider_lower)
+
+    if not env_var:
+        logger.error(
+            f"Unknown provider '{provider}'. "
+            f"Supported: {', '.join(_PROVIDER_ENV_VARS.keys())}"
+        )
+        sys.exit(1)
+
+    key = os.getenv(env_var)
+
+    if not key:
+        logger.error(
+            f"\\n{'=' * 60}\\n"
+            f"  ERROR: No API key found for provider '{provider}'\\n"
+            f"{'=' * 60}\\n"
+            f"  Expected environment variable: {env_var}\\n\\n"
+            f"  To fix this, do ONE of the following:\\n\\n"
+            f"  1. Create a .env file (copy from .env.example):\\n"
+            f"     cp .env.example .env\\n"
+            f"     # Then add your key to .env:\\n"
+            f"     {env_var}=sk-your-actual-key-here\\n\\n"
+            f"  2. Set the environment variable in your shell:\\n"
+            f"     export {env_var}=\\"sk-your-actual-key-here\\"\\n\\n"
+            f"  3. Pass it via CLI flag:\\n"
+            f"     python main.py --api-key sk-your-key ...\\n"
+            f"{'=' * 60}"
+        )
+        sys.exit(1)
+
+    # Mask key in logs for security
+    masked = key[:8] + "..." + key[-4:] if len(key) > 12 else "***"
+    logger.debug(f"Resolved API key for {provider}: {masked}")
+    return key
+
+
+def get_provider_config(provider: str) -> dict[str, Any]:
+    """Get the full configuration for a specific provider.
+
+    Args:
+        provider: Provider name.
+
+    Returns:
+        Dictionary with api_key, model, base_url, and any extras.
+    """
+    provider_lower = provider.lower()
+    api_key = get_api_key(provider_lower)
+
+    if provider_lower in ("qwen", "dashscope"):
+        return {
+            "api_key": api_key,
+            "model": settings.qwen_model_name,
+            "base_url": settings.qwen_api_base,
+            "provider": "qwen",
+        }
+    elif provider_lower == "openai":
+        return {
+            "api_key": api_key,
+            "model": os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview"),
+            "provider": "openai",
+        }
+    elif provider_lower == "anthropic":
+        return {
+            "api_key": api_key,
+            "model": os.getenv("ANTHROPIC_MODEL", "claude-3-opus-20240229"),
+            "provider": "anthropic",
+        }
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+
+
+def create_provider(provider: Optional[str] = None, api_key: Optional[str] = None):
+    """Create a configured LLM provider instance.
+
+    Uses environment variables and settings to configure the provider.
+    Supports OpenAI, Anthropic, and Qwen (via OpenAI-compatible API).
+
+    Args:
+        provider: Provider name (defaults to settings.default_provider).
+        api_key: Optional explicit API key override.
+
+    Returns:
+        Configured LLM provider instance.
+    """
+    from agent import OpenAIProvider, AnthropicProvider, QwenProvider
+
+    provider_name = (provider or settings.default_provider).lower()
+    config = get_provider_config(provider_name)
+
+    # Override with explicit key if provided
+    if api_key:
+        config["api_key"] = api_key
+
+    if provider_name in ("qwen", "dashscope"):
+        return QwenProvider(
+            api_key=config["api_key"],
+            model=config["model"],
+            base_url=config["base_url"],
+        )
+    elif provider_name == "openai":
+        return OpenAIProvider(
+            api_key=config["api_key"],
+            model=config["model"],
+        )
+    elif provider_name == "anthropic":
+        return AnthropicProvider(
+            api_key=config["api_key"],
+            model=config["model"],
+        )
+    else:
+        raise ValueError(
+            f"Unknown provider '{provider_name}'. "
+            f"Supported: openai, anthropic, qwen"
+        )
+
+
+def validate_env() -> bool:
+    """Validate that required environment variables are set.
+
+    Checks that at least one LLM provider API key is available.
+
+    Returns:
+        True if validation passes, False otherwise.
+    """
+    has_any_key = any(
+        os.getenv(env_var)
+        for env_var in _PROVIDER_ENV_VARS.values()
+    )
+
+    if not has_any_key:
+        logger.error(
+            "No LLM API keys found in environment. "
+            "Set at least one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, "
+            "or DASHSCOPE_API_KEY"
+        )
+        return False
+
+    return True
+`;
+
 export const requirementsTxt = `# AutoSec-Fixer - Requirements
 # ============================
+
+# Environment variable management
+python-dotenv>=1.0.0
 
 # Core LLM providers
 openai>=1.12.0
